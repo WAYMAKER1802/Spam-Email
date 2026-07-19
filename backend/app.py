@@ -106,7 +106,9 @@ def load_artifacts():
 # ── Explainability ────────────────────────────────────────────────────────────
 
 def generate_explanation(
-    label: str,
+    ml_label: str,
+    final_label: str,
+    threat_score: int,
     spam_probability: float,
     confidence: float,
     spam_lang: dict,
@@ -118,19 +120,20 @@ def generate_explanation(
 ) -> list:
     """
     Generate a human-readable list of reasons why an email was flagged.
-
-    Every item in the returned list corresponds to an actual detected signal.
-    Nothing is fabricated.
     """
     reasons = []
 
     # ML classification
     conf_pct = round(confidence * 100, 1)
     prob_pct = round(spam_probability * 100, 1)
-    if label == "Spam":
+    if ml_label == "Spam":
         reasons.append(f"ML model classified this message as Spam with {conf_pct}% confidence (spam probability: {prob_pct}%).")
     else:
         reasons.append(f"ML model classified this message as Not Spam with {conf_pct}% confidence.")
+
+    # Override explanation
+    if final_label == "Spam" and ml_label == "Ham":
+        reasons.append(f"Message flagged as Spam by heuristic analysis (Threat Score: {threat_score}/100) despite ML prediction.")
 
     # Phishing patterns
     for p in phishing.get("phishing_patterns", []):
@@ -218,7 +221,7 @@ def predict():
     proba       = model.predict_proba(feature_vector)[0]
     spam_probability = float(proba[1])
     confidence       = float(max(proba))
-    label = "Spam" if prediction == 1 else "Ham"
+    ml_label = "Spam" if prediction == 1 else "Ham"
 
     # ── 2. Sender analysis ────────────────────────────────────────────────────
     sender_analysis_result = analyze_sender(sender)
@@ -252,10 +255,16 @@ def predict():
         sender_score       = sender_score,
     )
     risk_level = risk_level_from_score(threat_score)
+    
+    # ── 8.5 Final Label Override ──────────────────────────────────────────────
+    # Heuristics can override a ML 'Ham' prediction if the threat is High/Critical
+    final_label = "Spam" if (threat_score >= 50 or ml_label == "Spam") else "Ham"
 
     # ── 9. Explainability ─────────────────────────────────────────────────────
     explanation = generate_explanation(
-        label            = label,
+        ml_label         = ml_label,
+        final_label      = final_label,
+        threat_score     = threat_score,
         spam_probability = spam_probability,
         confidence       = confidence,
         spam_lang        = spam_lang,
@@ -275,7 +284,7 @@ def predict():
 
     return jsonify({
         # ── ML classification ──────────────────────────────────────────────
-        "prediction":       label,
+        "prediction":       final_label,
         "spam_probability": round(spam_probability, 4),
         "confidence":       round(confidence, 4),
 
