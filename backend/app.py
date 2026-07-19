@@ -1,6 +1,8 @@
 import logging
 import os
 import joblib
+import hashlib
+import json
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from utils.preprocessing import build_feature_vector
@@ -22,6 +24,23 @@ _samples_since_retrain = 0
 app = Flask(__name__)
 CORS(app, resources={'/predict': {'origins': '*'}, '/health': {'origins': '*'}, '/feedback': {'origins': '*'}, '/learning-status': {'origins': '*'}})
 _artifacts = None
+
+MANUAL_OVERRIDES = os.path.join(BACKEND_DIR, 'manual_overrides.json')
+
+def load_overrides():
+    if os.path.exists(MANUAL_OVERRIDES):
+        try:
+            with open(MANUAL_OVERRIDES, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_override(text_hash, label):
+    overrides = load_overrides()
+    overrides[text_hash] = label
+    with open(MANUAL_OVERRIDES, 'w') as f:
+        json.dump(overrides, f)
 
 def load_artifacts():
     global _artifacts
@@ -90,6 +109,11 @@ def predict():
         text = f'{subject}\n{body}'.strip()
     if not text:
         return (jsonify({'error': "Request must include 'text', or 'subject'/'body'."}), 400)
+    
+    text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+    overrides = load_overrides()
+    manual_override_label = overrides.get(text_hash)
+    
     (feature_vector, clean_text) = build_feature_vector(text, artifacts)
     model = artifacts['model']
     prediction = model.predict(feature_vector)[0]
@@ -108,7 +132,20 @@ def predict():
     threat_score = compute_threat_score(spam_probability=spam_probability, confidence=confidence, url_reports=url_reports, spam_language_score=spam_lang['score_contribution'], phishing_score=phishing['score_contribution'], structural_score=structural['score_contribution'], attachment_score=attachment['score_contribution'], sender_score=sender_score)
     risk_level = risk_level_from_score(threat_score)
     final_label = 'Spam' if threat_score >= 50 or ml_label == 'Spam' else 'Ham'
-    explanation = generate_explanation(ml_label=ml_label, final_label=final_label, threat_score=threat_score, spam_probability=spam_probability, confidence=confidence, spam_lang=spam_lang, phishing=phishing, url_reports=url_reports, structural=structural, attachment=attachment, sender_analysis=sender_analysis_result)
+    
+    if manual_override_label:
+        final_label = manual_override_label
+        if final_label == 'Ham':
+            threat_score = 0
+            risk_level = 'Low'
+            explanation = ['You manually marked this exact email as Not Spam.']
+        else:
+            threat_score = 100
+            risk_level = 'Critical'
+            explanation = ['You manually marked this exact email as Spam.']
+    else:
+        explanation = generate_explanation(ml_label=ml_label, final_label=final_label, threat_score=threat_score, spam_probability=spam_probability, confidence=confidence, spam_lang=spam_lang, phishing=phishing, url_reports=url_reports, structural=structural, attachment=attachment, sender_analysis=sender_analysis_result)
+        
     matched_keywords = find_phishing_keywords(text)
     legacy_keywords = list({sig['phrase'] for sig in spam_lang.get('matched_signals', [])} | set(matched_keywords))
     return jsonify({'prediction': final_label, 'spam_probability': round(spam_probability, 4), 'confidence': round(confidence, 4), 'threat_score': threat_score, 'risk_level': risk_level, 'spam_signals': spam_lang['matched_signals'], 'spam_signal_count': spam_lang['signal_count'], 'spam_category_summary': spam_lang['category_summary'], 'phishing_patterns': phishing['phishing_patterns'], 'phishing_count': phishing['pattern_count'], 'urls': url_reports, 'url_count': len(urls), 'sender_score': sender_score, 'sender_flags': sender_analysis_result['sender_flags'], 'sender_email': sender_analysis_result['sender_email'], 'sender_domain': sender_analysis_result['sender_domain'], 'structural_flags': structural['flags'], 'attachment_warnings': attachment['warnings'], 'explanation': explanation, 'suspicious_keywords': legacy_keywords, 'keyword_count': len(legacy_keywords)})
@@ -129,6 +166,10 @@ def feedback():
     text = f'{subject}\n{body}'.strip()
     if not text:
         return (jsonify({'error': 'subject and/or body required.'}), 400)
+        
+    text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+    save_override(text_hash, correct_label)
+    
     (feature_vector, _) = build_feature_vector(text, artifacts)
     label = 1 if correct_label == 'Spam' else 0
     total = save_feedback_sample(feature_vector, label, FEEDBACK_STORE)
