@@ -138,10 +138,12 @@ def predict():
         if final_label == 'Ham':
             threat_score = 0
             risk_level = 'Low'
+            spam_probability = 0.0
             explanation = ['You manually marked this exact email as Not Spam.']
         else:
             threat_score = 100
             risk_level = 'Critical'
+            spam_probability = 1.0
             explanation = ['You manually marked this exact email as Spam.']
     else:
         explanation = generate_explanation(ml_label=ml_label, final_label=final_label, threat_score=threat_score, spam_probability=spam_probability, confidence=confidence, spam_lang=spam_lang, phishing=phishing, url_reports=url_reports, structural=structural, attachment=attachment, sender_analysis=sender_analysis_result)
@@ -158,8 +160,8 @@ def feedback():
     except FileNotFoundError as e:
         return (jsonify({'error': str(e)}), 503)
     data = request.get_json(silent=True) or {}
-    subject = data.get('subject', '')
-    body = data.get('body', '')
+    subject = data.get('subject', '') or ''
+    body = data.get('body', '') or ''
     correct_label = data.get('correct_label', '')
     if correct_label not in ('Spam', 'Ham'):
         return (jsonify({'error': "correct_label must be 'Spam' or 'Ham'."}), 400)
