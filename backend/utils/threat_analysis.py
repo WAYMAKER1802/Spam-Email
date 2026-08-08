@@ -5,7 +5,26 @@ IP_URL_REGEX = re.compile('https?://(\\d{1,3}\\.){3}\\d{1,3}')
 URL_SHORTENERS = {'bit.ly', 'tinyurl.com', 't.co', 'goo.gl', 'ow.ly', 'is.gd', 'buff.ly', 'shorte.st', 'cutt.ly', 'rb.gy', 'tiny.cc', 'clck.ru', 'x.co', 'snip.ly', 'v.gd', 'po.st', 'adf.ly', 'bc.vc'}
 SUSPICIOUS_TLDS = {'.xyz', '.top', '.club', '.work', '.click', '.loan', '.gq', '.tk', '.pw', '.cc', '.ml', '.ga', '.cf', '.rest', '.vip', '.icu', '.cyou', '.bond'}
 TRUSTED_DOMAINS = {'google.com', 'gmail.com', 'microsoft.com', 'outlook.com', 'apple.com', 'amazon.com', 'paypal.com', 'linkedin.com', 'twitter.com', 'x.com', 'facebook.com', 'instagram.com', 'youtube.com', 'github.com', 'dropbox.com'}
-PHISHING_KEYWORDS = ['urgent', 'verify your account', 'verify account', 'suspended', 'click here', 'act now', 'limited time', 'congratulations', 'you have won', 'free gift', 'claim your prize', 'winner', 'confirm your identity', 'update your payment', 'password expired', 'security alert', 'unusual activity', 'wire transfer', 'bank account', 'social security', 'gift card', 'act immediately', 'your account will be', 'reset your password', 'login attempt']
+PHISHING_KEYWORDS = [
+    # Account takeover / credential harvesting
+    'verify your account', 'verify account', 'confirm your identity',
+    'your account has been suspended', 'your account will be suspended',
+    'your account will be closed', 'unusual sign-in activity',
+    'login attempt was blocked', 'reset your password immediately',
+    'password has expired', 'update your payment information',
+    'confirm your payment details', 'your card has been declined',
+    # Financial scams
+    'wire transfer required', 'send gift card', 'buy gift cards',
+    'you have won a prize', 'claim your prize', 'claim your reward',
+    'you have been selected', 'free gift card', 'congratulations you won',
+    'nigerian prince', 'inheritance funds', 'unclaimed funds',
+    # Urgency / pressure tactics (specific, not generic)
+    'act now or your account', 'respond within 24 hours or',
+    'immediate action required on your account',
+    # Identity / financial data harvesting
+    'social security number', 'bank account number', 'routing number',
+    'enter your ssn', 'confirm your ssn',
+]
 
 def extract_urls(text: str) -> list:
     return list(dict.fromkeys(URL_REGEX.findall(text or '')))
@@ -61,20 +80,29 @@ def find_phishing_keywords(text: str) -> list:
     lower = (text or '').lower()
     return [kw for kw in PHISHING_KEYWORDS if kw in lower]
 
-def compute_threat_score(spam_probability: float, confidence: float=0.0, url_reports: list=None, spam_language_score: int=0, phishing_score: int=0, structural_score: int=0, attachment_score: int=0, sender_score: int=0) -> int:
+def compute_threat_score(spam_probability: float=0.0, confidence: float=0.0, url_reports: list=None, spam_language_score: int=0, phishing_score: int=0, structural_score: int=0, attachment_score: int=0, sender_score: int=0) -> int:
+    """Compute a PURELY HEURISTIC threat score (0-100).
+    The ML probability is intentionally excluded here; it is combined
+    separately in app.py via max(ml_prob, heuristic_score/100) to prevent
+    double-counting which inflates false positives on legitimate emails.
+    """
     url_reports = url_reports or []
-    ml_score = spam_probability * 45
-    confidence_bonus = 5.0 if confidence >= 0.95 else (confidence - 0.85) * 25 if confidence >= 0.85 else 0.0
-    phishing_pts = phishing_score / 30 * 20 if phishing_score > 0 else 0
-    spam_lang_pts = spam_language_score / 25 * 12 if spam_language_score > 0 else 0
+    # URL reputation (0-35 pts)
     url_pts = 0.0
     if url_reports:
         worst = max((r['risk_score'] for r in url_reports))
-        url_pts = worst / 100 * 10
-    sender_pts = sender_score / 100 * 8
-    structural_pts = structural_score / 10 * 5 if structural_score > 0 else 0
-    attachment_pts = attachment_score / 15 * 5 if attachment_score > 0 else 0
-    total = ml_score + confidence_bonus + phishing_pts + spam_lang_pts + url_pts + sender_pts + structural_pts + attachment_pts
+        url_pts = worst / 100 * 35
+    # Phishing patterns (0-30 pts)
+    phishing_pts = min(phishing_score / 30 * 30, 30) if phishing_score > 0 else 0
+    # Spam language signals (0-20 pts)
+    spam_lang_pts = min(spam_language_score / 25 * 20, 20) if spam_language_score > 0 else 0
+    # Sender reputation (0-10 pts)
+    sender_pts = sender_score / 100 * 10
+    # Structural anomalies (0-3 pts)
+    structural_pts = structural_score / 10 * 3 if structural_score > 0 else 0
+    # Attachment risks (0-2 pts)
+    attachment_pts = attachment_score / 15 * 2 if attachment_score > 0 else 0
+    total = url_pts + phishing_pts + spam_lang_pts + sender_pts + structural_pts + attachment_pts
     return int(round(min(total, 100)))
 
 def compute_threat_score_legacy(spam_probability: float, url_reports: list, matched_keywords: list, sender_score: int=0) -> int:

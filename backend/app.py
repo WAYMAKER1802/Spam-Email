@@ -110,6 +110,20 @@ def predict():
     if not text:
         return (jsonify({'error': "Request must include 'text', or 'subject'/'body'."}), 400)
     
+    import re
+    # Strip forwarding wrappers so we only scan the original scam payload
+    # Gmail: "---------- Forwarded message ---------"
+    fwd_match = re.search(r'(?:-{3,}\s*Forwarded message\s*-{3,}|Begin forwarded message:)(.*)', text, re.IGNORECASE | re.DOTALL)
+    if fwd_match:
+        fwd_text = fwd_match.group(1)
+        # Try to extract original sender
+        from_match = re.search(r'From:\s*.*?[<]([^>]+)[>]', fwd_text, re.IGNORECASE)
+        if not from_match:
+            from_match = re.search(r'From:\s*([^\n\r]+)', fwd_text, re.IGNORECASE)
+        if from_match:
+            sender = from_match.group(1).strip()
+        text = fwd_text.strip()
+        
     text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
     overrides = load_overrides()
     manual_override_label = overrides.get(text_hash)
@@ -118,9 +132,9 @@ def predict():
     model = artifacts['model']
     prediction = model.predict(feature_vector)[0]
     proba = model.predict_proba(feature_vector)[0]
-    spam_probability = float(proba[1])
-    confidence = float(max(proba))
-    ml_label = 'Spam' if prediction == 1 else 'Ham'
+    raw_spam_probability = float(proba[1])
+    raw_confidence = float(max(proba))
+    
     sender_analysis_result = analyze_sender(sender)
     sender_score = sender_analysis_result['sender_score']
     urls = extract_urls(text)
@@ -129,9 +143,18 @@ def predict():
     phishing = analyze_phishing(text, urls)
     structural = analyze_structure(subject, body, len(urls))
     attachment = analyze_attachments(text)
-    threat_score = compute_threat_score(spam_probability=spam_probability, confidence=confidence, url_reports=url_reports, spam_language_score=spam_lang['score_contribution'], phishing_score=phishing['score_contribution'], structural_score=structural['score_contribution'], attachment_score=attachment['score_contribution'], sender_score=sender_score)
+    
+    threat_score = compute_threat_score(spam_probability=raw_spam_probability, confidence=raw_confidence, url_reports=url_reports, spam_language_score=spam_lang['score_contribution'], phishing_score=phishing['score_contribution'], structural_score=structural['score_contribution'], attachment_score=attachment['score_contribution'], sender_score=sender_score)
     risk_level = risk_level_from_score(threat_score)
-    final_label = 'Spam' if threat_score >= 50 or ml_label == 'Spam' else 'Ham'
+    
+    # Unified Risk (Safety Net Approach)
+    # We take the MAXIMUM of the ML probability and the Heuristic Threat Score.
+    # This ensures that a strong Spam signal from ONE system isn't diluted by a low score from the OTHER system.
+    spam_probability = max(raw_spam_probability, threat_score / 100.0)
+    confidence = max(spam_probability, 1.0 - spam_probability)
+    
+    ml_label = 'Spam' if raw_spam_probability >= 0.60 else 'Ham'
+    final_label = 'Spam' if spam_probability >= 0.60 else 'Ham'
     
     if manual_override_label:
         final_label = manual_override_label
@@ -168,6 +191,13 @@ def feedback():
     text = f'{subject}\n{body}'.strip()
     if not text:
         return (jsonify({'error': 'subject and/or body required.'}), 400)
+        
+    import re
+    # Strip forwarding wrappers so we hash the same payload as predict
+    fwd_match = re.search(r'(?:-{3,}\s*Forwarded message\s*-{3,}|Begin forwarded message:)(.*)', text, re.IGNORECASE | re.DOTALL)
+    if fwd_match:
+        fwd_text = fwd_match.group(1)
+        text = fwd_text.strip()
         
     text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
     save_override(text_hash, correct_label)

@@ -1,8 +1,16 @@
 import re
+# Third-party bulk sending platforms (not the company themselves)
 BULK_SENDER_DOMAINS = {'mailchimp.com', 'sendgrid.net', 'amazonses.com', 'mailgun.org', 'sparkpostmail.com', 'constantcontact.com', 'klaviyo.com', 'campaign-monitor.com', 'getresponse.com', 'sendinblue.com', 'brevo.com', 'mailjet.com', 'postmarkapp.com', 'mandrillapp.com', 'mcsv.net', 'list-manage.com'}
-BULK_SUBDOMAIN_PATTERNS = ['^mail\\d+\\.', '^mailer\\d*\\.', '^em\\d+\\.', '^mg\\.', '^smtp\\d+\\.', '^bulk\\.', '^news\\d*\\.', '^promo\\d*\\.', '^marketing\\.', '^newsletter\\.', '^noreply\\.', '^no-reply\\.', '^bounce\\.', '^reply\\.', '^notification\\.', '^outbound\\.', '^send\\d+\\.', '^e\\.mail\\.', '^e\\d+\\.']
+# NOTE: no-reply / noreply are intentionally EXCLUDED — they are the standard pattern
+# for every legitimate corporate sender (banks, universities, companies). Penalising
+# them causes massive false positives on genuine transactional/marketing emails.
+BULK_SUBDOMAIN_PATTERNS = [
+    r'^mail\d+\.', r'^mailer\d*\.', r'^em\d+\.', r'^mg\.',
+    r'^smtp\d+\.', r'^bulk\.', r'^promo\d*\.', r'^bounce\.',
+    r'^outbound\.', r'^send\d+\.', r'^e\.mail\.', r'^e\d+\.'
+]
 SUSPICIOUS_TLDS = {'.xyz', '.top', '.club', '.work', '.click', '.loan', '.gq', '.tk', '.pw', '.cc'}
-FREE_EMAIL_PROVIDERS = {'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com', 'mail.com', 'ymail.com', 'live.com', 'msn.com', 'icloud.com', 'me.com', 'protonmail.com', 'zoho.com'}
+FREE_EMAIL_PROVIDERS = {'gmail.com', 'yahoo.com', 'hotmail.com', 'aol.com', 'mail.com', 'ymail.com', 'live.com', 'msn.com', 'icloud.com', 'me.com', 'protonmail.com', 'zoho.com'}
 
 def _extract_email(sender: str):
     match = re.search('<([^>]+)>', sender)
@@ -32,12 +40,13 @@ def analyze_sender(sender: str) -> dict:
             flags.append('Subdomain pattern typical of mass-mailing infrastructure')
             score += 25
             break
-    if display_name:
-        display_words = re.findall('[a-zA-Z]{4,}', display_name.lower())
-        if display_words and (not any((w in domain for w in display_words))):
-            flags.append("Display name doesn't match the actual sending domain")
-            score += 15
-    if domain in FREE_EMAIL_PROVIDERS and display_name and (len(display_name) > 3):
+    # Display name mismatch: only penalise when sending from a FREE personal
+    # email provider (e.g. gmail.com). Legitimate companies routinely use
+    # short/abbreviated domains (sc.com for Standard Chartered, hp.com for HP)
+    # that intentionally don't match their display name — do NOT penalise these.
+    if domain in FREE_EMAIL_PROVIDERS and display_name and len(display_name) > 3:
+        flags.append("Display name doesn't match the actual sending domain")
+        score += 15
         flags.append('A brand/company name is sending from a free personal email provider')
         score += 12
     for tld in SUSPICIOUS_TLDS:
